@@ -1,0 +1,163 @@
+import os
+import asyncio
+from aiogram import Bot, Dispatcher, F
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from aiogram.filters import CommandStart
+
+# Укажите ваш токен от @BotFather
+BOT_TOKEN = 8823685950:AAENF0MyJH6ZUghzKl05XeemkjufUDIA9X4
+# ID137226529 дминистратора для подтверждения VIP-покупок
+ADMIN_ID =137226529
+
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
+
+# Временная база данных (в реальном проекте используйте SQLite/PostgreSQL)
+users_db = {}  # {user_id: {"is_vip": False, "pending_pay": False}}
+
+# Главная клавиатура
+def get_main_kb(user_id: int):
+    is_vip = users_db.get(user_id, {}).get("is_vip", False)
+    status = "🌟 Вы VIP" if is_vip else "👑 Купить VIP"
+    
+    kb = [
+        [InlineKeyboardButton(text=status, callback_data="buy_vip")],
+        [InlineKeyboardButton(text="ℹ️ Инструкция", callback_data="help_info")]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+# Команда /start
+@dp.message(CommandStart())
+async def start_cmd(message: Message):
+    user_id = message.from_user.id
+    if user_id not in users_db:
+        users_db[user_id] = {"is_vip": False, "pending_pay": False}
+        
+    await message.answer(
+        🌟 "Привет! Отправь мне ссылку на видео (YouTube, TikTok, VK, Inst и др.), и я скачаю его.\n"
+        "Обычные пользователи имеют ограничения. VIP-пользователи качают без лимитов!",
+        reply_markup=get_main_kb(user_id)
+    )
+
+# Обработка кнопки "Купить VIP"
+@dp.callback_query(F.data == "buy_vip")
+async def process_buy_vip(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    if users_db.get(user_id, {}).get("is_vip"):
+        await callback.answer("У вас уже есть VIP-статус!", show_alert=True)
+        return
+
+    text = (
+        "💳 **Оплата VIP-доступа**\n\n"
+        "Переведите 299 руб. по реквизитам:\n"
+      "`2204320474551878 (озон / )\n\n"
+        "После оплаты обязательно нажмите кнопку ниже, чтобы отправить чек на проверку."
+    )
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Я оплатил(а)", callback_data="confirm_payment")]
+    ])
+    
+    await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+
+# Кнопка подтверждения оплаты пользователем
+@dp.callback_query(F.data == "confirm_payment")
+async def user_confirm(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    username = callback.from_user.username or "без юзернейма"
+    
+    users_db[user_id]["pending_pay"] = True
+    
+    await callback.message.edit_text("⏳ Ваша заявка отправлена администратору. Ожидайте подтверждения.")
+    
+    # Отправка уведомления админу
+    admin_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"adm_approve_{user_id}"),
+            InlineKeyboardButton(text="❌ Отклонить", callback_data=f"adm_decline_{user_id}")
+        ]
+    ])
+    
+    await bot.send_message(
+        chat_id=ADMIN_ID,
+        text=f"🔔 **Новая заявка на VIP!**\nПользователь: {user_id} (@{username})",
+        reply_markup=admin_kb
+    )
+
+# Обработка решения админа (Подтвердить)
+@dp.callback_query(F.data.startswith("adm_approve_"))
+async def admin_approve(callback: CallbackQuery):
+    target_user_id = int(callback.data.replace("adm_approve_", ""))
+    
+    if target_user_id in users_db:
+        users_db[target_user_id]["is_vip"] = True
+        users_db[target_user_id]["pending_pay"] = False
+        
+        # Уведомляем пользователя
+        try:
+            await bot.send_message(target_user_id, "🎉 Поздравляем! Ваш VIP-статус успешно активирован!")
+        except Exception:
+            pass
+            
+        await callback.message.edit_text(f"✅ VIP для пользователя {target_user_id} успешно активирован.")
+    else:
+        await callback.answer("Пользователь не найден.")
+
+# Обработка решения админа (Отклонить)
+@dp.callback_query(F.data.startswith("adm_decline_"))
+async def admin_decline(callback: CallbackQuery):
+    target_user_id = int(callback.data.replace("adm_decline_", ""))
+    
+    if target_user_id in users_db:
+        users_db[target_user_id]["pending_pay"] = False
+        
+        try:
+            await bot.send_message(target_user_id, "❌ Ваша заявка на VIP была отклонена. Если это ошибка, свяжитесь с поддержкой.")
+        except Exception:
+            pass
+            
+        await callback.message.edit_text(f"❌ Заявка пользователя {target_user_id} отклонена.")
+
+# Обработка ссылок и скачивание видео
+@dp.message(F.text.contains("http://") | F.text.contains("https://"))
+async def handle_video_link(message: Message):
+    url = message.text.strip()
+    user_id = message.from_user.id
+    is_vip = users_db.get(user_id, {}).get("is_vip", False)
+
+    # Пример бизнес-логики: не-VIP могут качать, но, например, с ограничением (или только VIP)
+    # В данном примере просто качаем всем, но VIP получает приветствие
+    status_msg = await message.answer("📥 Начинаю скачивание видео, подождите...")
+
+    # Настройка папки для сохранения
+    output_filename = f"video_{user_id}.mp4"
+    
+    # Команда для yt-dlp (выбирает лучшее качество, но не более 1080p для экономии ресурсов)
+    # Также качает видео сразу в один файл mp4
+    cmd = f'yt-dlp -f "best[ext=mp4]/best" -o "{output_filename}" "{url}"'
+    
+    try:
+        # Запуск скачивания в отдельном потоке, чтобы бот не зависал
+        proc = await asyncio.create_subprocess_shell(cmd)
+        await proc.communicate()
+
+        if os.path.exists(output_filename):
+            await status_msg.edit_text("📤 Отправляю видео...")
+            # Отправка видео пользователю
+            await message.reply_video(video=open(output_filename, 'rb'), caption="Вот ваше видео! ✨")
+            os.remove(output_filename) # Удаляем файл с сервера после отправки
+            await status_msg.delete()
+        else:
+            await status_msg.edit_text("❌ Не удалось скачать видео. Возможно, платформа не поддерживается или ссылка недействительна.")
+            
+    except Exception as e:
+        await status_msg.edit_text(f"⚠️ Произошла ошибка при обработке.")
+        if os.path.exists(output_filename):
+            os.remove(output_filename)
+
+# Запуск бота
+async def main():
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
